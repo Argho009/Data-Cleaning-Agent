@@ -58,6 +58,9 @@ def _llm_choose_action(
 ) -> Dict[str, Any]:
     # Keep a deterministic fallback to preserve reproducibility.
     fallback = _choose_action(task_id, step_count)
+    if client is None:
+        return fallback
+
     prompt = {
         "task_id": task_id,
         "step_count": step_count,
@@ -80,6 +83,7 @@ def _llm_choose_action(
                 {"role": "system", "content": "You are a precise data-cleaning agent."},
                 {"role": "user", "content": json.dumps(prompt)},
             ],
+            timeout=10.0,
         )
         content = completion.choices[0].message.content or "{}"
         parsed = json.loads(content)
@@ -90,7 +94,8 @@ def _llm_choose_action(
         if not isinstance(params, dict):
             params = {}
         return {"action_type": action_type, "parameters": params}
-    except Exception:
+    except Exception as e:
+        print(f"[WARNING] LLM action failed: {e}. Using deterministic fallback.")
         return fallback
 
 
@@ -103,13 +108,27 @@ def run_task(
     timeout_s: float,
 ) -> float:
     print(f"[START] task_id={task_id} seed={seed}")
+    import time
     try:
-        r = requests.post(
-            f"{env_base}/reset",
-            json={"task_id": task_id, "seed": seed},
-            timeout=timeout_s,
-        )
-        r.raise_for_status()
+        r = None
+        for attempt in range(5):
+            try:
+                r = requests.post(
+                    f"{env_base}/reset",
+                    json={"task_id": task_id, "seed": seed},
+                    timeout=timeout_s,
+                )
+                r.raise_for_status()
+                break
+            except requests.exceptions.ConnectionError as e:
+                if attempt == 4:
+                    raise e
+                print(f"[RETRY] Waiting for environment server... attempt {attempt + 1}")
+                time.sleep(2)
+                
+        if r is None:
+            return 0.0
+
         observation = r.json()
         done = False
         step = 0
